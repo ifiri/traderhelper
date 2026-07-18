@@ -1,0 +1,48 @@
+watches:
+  - inst_id: BTC-USDT
+    timeframe: 1H
+    price_alerts:
+      - type: above
+        value: 100000
+      - type: below
+        value: 90000
+    macd_cross: true
+    rsi:
+      period: 14
+      overbought: 70
+      oversold: 30
+    ema:
+      fast: 20
+      mid: 100
+      slow: 200
+      cross: true
+    divergence:
+      rsi: true
+      macd: true
+      lookback: 60
+      pivot_left: 3
+      pivot_right: 3
+    combo:
+      - name: bull confluence
+        window: 10
+        require:
+          - kind: divergence
+            direction: bullish
+          - kind: ema_cross
+            direction: bullish
+          - kind: rsi
+            direction: bullish
+
+  - inst_id: ETH-USDT
+    timeframe: 15m
+    macd_cross: true
+    rsi:
+      period: 14
+      overbought: 70
+      oversold: 30
+    divergence:
+      rsi: true
+      macd: false
+      lookback: 60
+      pivot_left: 3
+      pivot_right: 3
