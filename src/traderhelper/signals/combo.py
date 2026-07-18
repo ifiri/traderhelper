@@ -17,19 +17,17 @@ def detect_combo(
         return []
 
     candle = candles[-1]
-    current_index = len(candles) - 1
     signals: list[Signal] = []
     base = watch_key(watch.inst_id, watch.timeframe)
 
     for rule in watch.combo:
-        window_start_index = max(0, current_index - rule.window + 1)
         matched: list[str] = []
         activation_ts: list[int] = []
         all_matched = True
 
         for condition in rule.require:
             active = tracker.get(watch, condition.kind, condition.direction)
-            if not condition_in_window(active, window_start_index=window_start_index):
+            if not condition_in_window(active, candles, window=rule.window):
                 all_matched = False
                 break
             assert active is not None

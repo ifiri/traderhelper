@@ -42,3 +42,12 @@ def test_confirm_clears_older_live() -> None:
     store.upsert("BTC:1H", make_candle(1, 1.0, confirm=True))
     assert store.last_price("BTC:1H") == 1.0
     assert store.latest_closed_ts("BTC:1H") == 1
+
+
+def test_upsert_keeps_ts_order_on_out_of_order_insert() -> None:
+    store = CandleStore(max_candles=10)
+    store.upsert("BTC:1H", make_candle(1, 1.0))
+    store.upsert("BTC:1H", make_candle(3, 3.0))
+    store.upsert("BTC:1H", make_candle(2, 2.0))
+    assert [candle.ts for candle in store.closed_candles("BTC:1H")] == [1, 2, 3]
+    assert store.latest_closed_ts("BTC:1H") == 3

@@ -171,7 +171,6 @@ def test_combo_blocked_when_divergence_closes() -> None:
             kind=ComboConditionKind.DIVERGENCE,
             direction=ComboDirection.BULLISH,
             activated_ts=1,
-            activated_index=0,
             valid=True,
             pivot_price=8.0,
             fingerprint="rsi:1:2:bullish",
@@ -199,6 +198,49 @@ def test_combo_blocked_when_divergence_closes() -> None:
         tracker,
     )
     assert detect_combo(watch, broken, tracker, state) == []
+
+
+def test_combo_window_uses_activation_timestamp() -> None:
+    watch = _watch_combo()
+    tracker = ConditionTracker()
+    state = DedupState()
+    candles = [make_candle(ts, 100.0) for ts in range(1, 12)]
+
+    update_conditions(
+        watch,
+        candles[:2],
+        _snapshot(
+            rsi=[50.0, 25.0],
+            ema_fast=[90.0, 105.0],
+            ema_slow=[100.0, 100.0],
+        ),
+        tracker,
+    )
+    for end in range(3, 11):
+        update_conditions(
+            watch,
+            candles[:end],
+            _snapshot(
+                rsi=[50.0] + [25.0] * (end - 1),
+                ema_fast=[90.0, 105.0] + [106.0] * (end - 2),
+                ema_slow=[100.0] * end,
+            ),
+            tracker,
+        )
+
+    assert detect_combo(watch, candles[:10], tracker, state) == []
+
+    update_conditions(
+        watch,
+        candles[:11],
+        _snapshot(
+            rsi=[50.0] + [25.0] * 10,
+            ema_fast=[90.0, 105.0] + [106.0] * 9,
+            ema_slow=[100.0] * 11,
+        ),
+        tracker,
+    )
+    assert detect_combo(watch, candles[:11], tracker, state) == []
 
 
 def test_standalone_rsi_still_emits_with_combo() -> None:

@@ -28,9 +28,9 @@ class CandleStore:
 
         series = self._series.setdefault(key, OrderedDict())
         previous = series.get(candle.ts)
-        series[candle.ts] = candle
-        while len(series) > self._max_candles:
-            series.popitem(last=False)
+        self._put_closed(series, candle)
+        self._series[key] = series
+        self._trim(series)
 
         live = self._live.get(key)
         if live is not None and live.ts <= candle.ts:
@@ -58,3 +58,21 @@ class CandleStore:
         if not series:
             return None
         return next(reversed(series.values())).ts
+
+    def _put_closed(self, series: OrderedDict[int, Candle], candle: Candle) -> None:
+        if candle.ts in series:
+            series[candle.ts] = candle
+            return
+
+        if not series or candle.ts > next(reversed(series)):
+            series[candle.ts] = candle
+            return
+
+        series[candle.ts] = candle
+        rebuilt = OrderedDict(sorted(series.items(), key=lambda item: item[0]))
+        series.clear()
+        series.update(rebuilt)
+
+    def _trim(self, series: OrderedDict[int, Candle]) -> None:
+        while len(series) > self._max_candles:
+            series.popitem(last=False)

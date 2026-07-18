@@ -37,3 +37,16 @@ class Signal:
             dt = datetime.fromtimestamp(self.candle_ts / 1000, tz=timezone.utc)
             lines.append(f"Candle: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
         return "\n".join(lines)
+
+
+def format_signals_digest(signals: list[Signal], *, title: str | None = None) -> str:
+    if not signals:
+        return ""
+    if len(signals) == 1:
+        return signals[0].format_message()
+
+    header = title or f"Catch-up: {len(signals)} signals"
+    blocks = [f"<b>{header}</b>"]
+    for signal_item in signals:
+        blocks.append(signal_item.format_message())
+    return "\n\n".join(blocks)

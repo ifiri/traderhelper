@@ -11,6 +11,7 @@ from traderhelper.config import (
 )
 from traderhelper.indicators import IndicatorSnapshot
 from traderhelper.market import Candle
+from traderhelper.signals.crosses import CrossSide, line_cross, macd_cross, values_ready
 from traderhelper.signals.divergence import find_active_divergences
 
 
@@ -19,7 +20,6 @@ class ActiveCondition:
     kind: ComboConditionKind
     direction: ComboDirection
     activated_ts: int
-    activated_index: int
     valid: bool
     pivot_price: float | None = None
     fingerprint: str | None = None
@@ -69,7 +69,6 @@ def _activate(
     direction: ComboDirection,
     *,
     activated_ts: int,
-    activated_index: int,
     pivot_price: float | None = None,
     fingerprint: str | None = None,
 ) -> None:
@@ -82,7 +81,6 @@ def _activate(
             kind=kind,
             direction=direction,
             activated_ts=activated_ts,
-            activated_index=activated_index,
             valid=True,
             pivot_price=pivot_price,
             fingerprint=fingerprint,
@@ -99,15 +97,14 @@ def update_conditions(
     if not candles:
         return
 
-    index = len(candles) - 1
     candle = candles[-1]
     ts = candle.ts
     close = candle.close
 
-    _update_rsi(watch, snapshot, tracker, ts=ts, index=index)
-    _update_ema(watch, candles, snapshot, tracker, ts=ts, index=index)
-    _update_macd(watch, candles, snapshot, tracker, ts=ts, index=index)
-    _update_divergence(watch, candles, snapshot, tracker, ts=ts, index=index, close=close)
+    _update_rsi(watch, snapshot, tracker, ts=ts)
+    _update_ema(watch, candles, snapshot, tracker, ts=ts)
+    _update_macd(watch, candles, snapshot, tracker, ts=ts)
+    _update_divergence(watch, candles, snapshot, tracker, ts=ts, close=close)
 
 
 def _update_rsi(
@@ -116,7 +113,6 @@ def _update_rsi(
     tracker: ConditionTracker,
     *,
     ts: int,
-    index: int,
 ) -> None:
     if watch.rsi is None and not watch.combo_requires(ComboConditionKind.RSI):
         return
@@ -133,7 +129,6 @@ def _update_rsi(
             ComboConditionKind.RSI,
             ComboDirection.BULLISH,
             activated_ts=ts,
-            activated_index=index,
         )
     else:
         tracker.invalidate(watch, ComboConditionKind.RSI, ComboDirection.BULLISH)
@@ -145,7 +140,6 @@ def _update_rsi(
             ComboConditionKind.RSI,
             ComboDirection.BEARISH,
             activated_ts=ts,
-            activated_index=index,
         )
     else:
         tracker.invalidate(watch, ComboConditionKind.RSI, ComboDirection.BEARISH)
@@ -158,7 +152,6 @@ def _update_ema(
     tracker: ConditionTracker,
     *,
     ts: int,
-    index: int,
 ) -> None:
     ema_enabled = watch.ema is not None and watch.ema.cross
     if not ema_enabled and not watch.combo_requires(ComboConditionKind.EMA_CROSS):
@@ -170,39 +163,38 @@ def _update_ema(
     curr_fast = float(snapshot.ema_fast.iloc[-1])
     prev_slow = float(snapshot.ema_slow.iloc[-2])
     curr_slow = float(snapshot.ema_slow.iloc[-1])
-    if any(math.isnan(value) for value in (prev_fast, curr_fast, prev_slow, curr_slow)):
-        return
 
-    if prev_fast <= prev_slow and curr_fast > curr_slow:
+    cross = line_cross(prev_fast, prev_slow, curr_fast, curr_slow)
+    if cross is CrossSide.BULLISH:
         _activate(
             tracker,
             watch,
             ComboConditionKind.EMA_CROSS,
             ComboDirection.BULLISH,
             activated_ts=ts,
-            activated_index=index,
             fingerprint=f"cross:{ts}",
         )
         tracker.invalidate(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BEARISH)
-    elif prev_fast >= prev_slow and curr_fast < curr_slow:
+    elif cross is CrossSide.BEARISH:
         _activate(
             tracker,
             watch,
             ComboConditionKind.EMA_CROSS,
             ComboDirection.BEARISH,
             activated_ts=ts,
-            activated_index=index,
             fingerprint=f"cross:{ts}",
         )
         tracker.invalidate(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BULLISH)
 
-    bullish = tracker.get(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BULLISH)
-    if bullish is not None and bullish.valid and curr_fast <= curr_slow:
-        tracker.invalidate(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BULLISH)
-
-    bearish = tracker.get(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BEARISH)
-    if bearish is not None and bearish.valid and curr_fast >= curr_slow:
-        tracker.invalidate(watch, ComboConditionKind.EMA_CROSS, ComboDirection.BEARISH)
+    if values_ready(curr_fast, curr_slow):
+        if curr_fast <= curr_slow:
+            tracker.invalidate(
+                watch, ComboConditionKind.EMA_CROSS, ComboDirection.BULLISH
+            )
+        if curr_fast >= curr_slow:
+            tracker.invalidate(
+                watch, ComboConditionKind.EMA_CROSS, ComboDirection.BEARISH
+            )
 
 
 def _update_macd(
@@ -212,7 +204,6 @@ def _update_macd(
     tracker: ConditionTracker,
     *,
     ts: int,
-    index: int,
 ) -> None:
     if not watch.macd_cross and not watch.combo_requires(ComboConditionKind.MACD_CROSS):
         return
@@ -223,42 +214,44 @@ def _update_macd(
     prev_signal = float(snapshot.macd_signal.iloc[-2])
     curr_macd = float(snapshot.macd.iloc[-1])
     curr_signal = float(snapshot.macd_signal.iloc[-1])
-    if any(math.isnan(value) for value in (prev_macd, prev_signal, curr_macd, curr_signal)):
-        return
 
-    prev_diff = prev_macd - prev_signal
-    curr_diff = curr_macd - curr_signal
-
-    if prev_diff <= 0 < curr_diff:
+    cross = macd_cross(
+        prev_macd=prev_macd,
+        prev_signal=prev_signal,
+        curr_macd=curr_macd,
+        curr_signal=curr_signal,
+    )
+    if cross is CrossSide.BULLISH:
         _activate(
             tracker,
             watch,
             ComboConditionKind.MACD_CROSS,
             ComboDirection.BULLISH,
             activated_ts=ts,
-            activated_index=index,
             fingerprint=f"cross:{ts}",
         )
         tracker.invalidate(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BEARISH)
-    elif prev_diff >= 0 > curr_diff:
+    elif cross is CrossSide.BEARISH:
         _activate(
             tracker,
             watch,
             ComboConditionKind.MACD_CROSS,
             ComboDirection.BEARISH,
             activated_ts=ts,
-            activated_index=index,
             fingerprint=f"cross:{ts}",
         )
         tracker.invalidate(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BULLISH)
 
-    bullish = tracker.get(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BULLISH)
-    if bullish is not None and bullish.valid and curr_diff <= 0:
-        tracker.invalidate(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BULLISH)
-
-    bearish = tracker.get(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BEARISH)
-    if bearish is not None and bearish.valid and curr_diff >= 0:
-        tracker.invalidate(watch, ComboConditionKind.MACD_CROSS, ComboDirection.BEARISH)
+    if values_ready(curr_macd, curr_signal):
+        curr_diff = curr_macd - curr_signal
+        if curr_diff <= 0:
+            tracker.invalidate(
+                watch, ComboConditionKind.MACD_CROSS, ComboDirection.BULLISH
+            )
+        if curr_diff >= 0:
+            tracker.invalidate(
+                watch, ComboConditionKind.MACD_CROSS, ComboDirection.BEARISH
+            )
 
 
 def _update_divergence(
@@ -268,7 +261,6 @@ def _update_divergence(
     tracker: ConditionTracker,
     *,
     ts: int,
-    index: int,
     close: float,
 ) -> None:
     cfg = watch.effective_divergence()
@@ -290,7 +282,6 @@ def _update_divergence(
             ComboConditionKind.DIVERGENCE,
             direction,
             activated_ts=ts,
-            activated_index=index,
             pivot_price=found.pivot_price,
             fingerprint=found.fingerprint,
         )
@@ -307,11 +298,11 @@ def _update_divergence(
 
 def condition_in_window(
     active: ActiveCondition | None,
+    candles: list[Candle],
     *,
-    window_start_index: int,
+    window: int,
 ) -> bool:
-    return (
-        active is not None
-        and active.valid
-        and active.activated_index >= window_start_index
-    )
+    if active is None or not active.valid or not candles or window < 1:
+        return False
+    window_start_ts = candles[-window:][0].ts
+    return active.activated_ts >= window_start_ts

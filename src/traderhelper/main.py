@@ -9,12 +9,12 @@ from pathlib import Path
 import aiohttp
 
 from traderhelper.config import AppConfig, EnvSettings, WatchConfig, load_config, watch_key
-from traderhelper.indicators import IndicatorSnapshot, compute_indicators
+from traderhelper.indicators import compute_indicators, indicator_needs
 from traderhelper.market import Candle
 from traderhelper.market.candle_store import CandleStore
 from traderhelper.notify import TelegramNotifier
 from traderhelper.okx import CandleUpdate, OkxCandleStream, OkxRestClient
-from traderhelper.signals import Signal
+from traderhelper.signals import Signal, format_signals_digest
 from traderhelper.signals.combo import detect_combo
 from traderhelper.signals.conditions import ConditionTracker, update_conditions
 from traderhelper.signals.dedup import DedupState
@@ -107,24 +107,14 @@ class SignalDaemon:
                 self._store.seed(key, candles)
                 closed = self._store.closed_candles(key)
                 logger.info("warmed %s with %s closed candles", key, len(closed))
-                price = self._store.last_price(key)
-                if price is not None:
-                    arm_price_alerts(watch, price, self._state)
-                snapshot = self._compute_snapshot(watch, closed)
-                if snapshot is not None:
-                    arm_rsi_levels(watch, snapshot, self._state)
-                    update_conditions(watch, closed, snapshot, self._conditions)
-                    detect_macd_cross(watch, closed, snapshot, self._state)
-                    detect_ema_cross(watch, closed, snapshot, self._state)
-                    detect_divergences(watch, closed, snapshot, self._state)
-                    detect_combo(watch, closed, self._conditions, self._state)
+                self._arm_watch(watch)
 
         await asyncio.gather(*(warm_one(watch) for watch in self._app.watches))
 
     async def _on_reconnect(self) -> None:
         assert self._rest is not None
         logger.info("refilling candle gaps after reconnect")
-        catch_up_signals = 0
+        catch_up: list[Signal] = []
         for watch in self._app.watches:
             key = watch_key(watch.inst_id, watch.timeframe)
             latest = self._store.latest_closed_ts(key)
@@ -135,6 +125,7 @@ class SignalDaemon:
                     limit=self._history_limit,
                 )
                 self._store.seed(key, candles)
+                self._arm_watch(watch)
                 continue
             candles = await self._rest.fetch_candles_since(
                 watch.inst_id,
@@ -146,8 +137,12 @@ class SignalDaemon:
                     continue
                 closed = self._store.upsert(key, candle)
                 if closed is not None and self._warmup_done:
-                    catch_up_signals += await self._process_closed(watch, emit=True)
-        logger.info("reconnect catch-up emitted %s signals", catch_up_signals)
+                    catch_up.extend(self._collect_closed_signals(watch))
+        if catch_up:
+            logger.info("reconnect catch-up digest with %s signals", len(catch_up))
+            await self._emit_digest(catch_up)
+        else:
+            logger.info("reconnect catch-up emitted 0 signals")
 
     async def _on_candle(self, update: CandleUpdate) -> None:
         watch = self._watches.get(update.key)
@@ -159,17 +154,37 @@ class SignalDaemon:
         await self._emit_signals(detect_price_alerts(watch, price, self._state))
 
         if closed is not None:
-            await self._process_closed(watch, emit=True)
+            await self._emit_signals(self._collect_closed_signals(watch))
+
+    def _arm_watch(self, watch: WatchConfig) -> None:
+        key = watch_key(watch.inst_id, watch.timeframe)
+        closed = self._store.closed_candles(key)
+        price = self._store.last_price(key)
+        if price is not None:
+            arm_price_alerts(watch, price, self._state)
+        snapshot = self._compute_snapshot(watch, closed)
+        if snapshot is None:
+            return
+        arm_rsi_levels(watch, snapshot, self._state)
+        update_conditions(watch, closed, snapshot, self._conditions)
+        detect_macd_cross(watch, closed, snapshot, self._state)
+        detect_ema_cross(watch, closed, snapshot, self._state)
+        detect_divergences(watch, closed, snapshot, self._state)
+        detect_combo(watch, closed, self._conditions, self._state)
 
     def _compute_snapshot(
         self,
         watch: WatchConfig,
         candles: list[Candle],
-    ) -> IndicatorSnapshot | None:
+    ):
+        needs = indicator_needs(watch)
+        if not needs.any:
+            return None
         rsi_period = watch.effective_rsi().period
         ema = watch.effective_ema()
         return compute_indicators(
             candles,
+            needs=needs,
             rsi_period=rsi_period,
             macd_fast=watch.macd_fast,
             macd_slow=watch.macd_slow,
@@ -179,13 +194,13 @@ class SignalDaemon:
             ema_slow=ema.slow,
         )
 
-    async def _process_closed(self, watch: WatchConfig, *, emit: bool) -> int:
+    def _collect_closed_signals(self, watch: WatchConfig) -> list[Signal]:
         key = watch_key(watch.inst_id, watch.timeframe)
         candles = self._store.closed_candles(key)
         snapshot = self._compute_snapshot(watch, candles)
         if snapshot is None:
             logger.debug("not enough candles for indicators on %s", key)
-            return 0
+            return []
 
         update_conditions(watch, candles, snapshot, self._conditions)
 
@@ -195,10 +210,7 @@ class SignalDaemon:
         signals.extend(detect_ema_cross(watch, candles, snapshot, self._state))
         signals.extend(detect_divergences(watch, candles, snapshot, self._state))
         signals.extend(detect_combo(watch, candles, self._conditions, self._state))
-        if emit:
-            await self._emit_signals(signals)
-            return len(signals)
-        return 0
+        return signals
 
     async def _emit_signals(self, signals: list[Signal]) -> None:
         if not signals or self._notifier is None:
@@ -215,6 +227,27 @@ class SignalDaemon:
                 await self._notifier.send(signal_item.format_message())
             except Exception:
                 logger.exception("failed to send telegram signal")
+
+    async def _emit_digest(self, signals: list[Signal]) -> None:
+        if not signals or self._notifier is None:
+            return
+        for signal_item in signals:
+            logger.info(
+                "signal %s %s %s %s",
+                signal_item.kind.value,
+                signal_item.inst_id,
+                signal_item.timeframe,
+                signal_item.direction,
+            )
+        try:
+            await self._notifier.send(
+                format_signals_digest(
+                    signals,
+                    title=f"Catch-up: {len(signals)} signals",
+                )
+            )
+        except Exception:
+            logger.exception("failed to send telegram catch-up digest")
 
 
 def configure_logging(verbose: bool) -> None:
